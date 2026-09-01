@@ -2,6 +2,8 @@
 
 [![CI](https://github.com/csiroqa/dsh-schedule/actions/workflows/ci.yml/badge.svg)](https://github.com/csiroqa/dsh-schedule/actions/workflows/ci.yml)
 
+> This repository is forked from [csiroqa/dsh-schedule](https://github.com/csiroqa/dsh-schedule). All original functionality, design, and implementation are credited to the original author, **csiroqa**; this fork only fixes the security issue documented below. See the upstream repository for the original project and license.
+
 A **scheduled tasks + status monitoring** plugin for DeepSeek Harness (DSH): run agents automatically on a cron schedule (daily digests, periodic checks, automated reports), and inspect combined system/harness status via the `/status` command and a settings dashboard.
 
 中文: [README.md](README.md)
@@ -64,10 +66,23 @@ Restart `dsh web` and hard-refresh the browser (**Ctrl+F5**).
 - The client half depends only on platform modules (react, etc.)
 - Build: `tsdown` (host `lib/index.js` + browser `lib/client.js`, standard `window.__ModuleLoader__.load` closure-factory format)
 
+## Changes in this fork (relative to upstream csiroqa/dsh-schedule)
+
+A security scan found that `POST /dsh-schedule/tasks` (the settings-page endpoint for adding/removing/pausing/resuming/running tasks) relied only on loopback binding for protection and never validated the request's origin. Because that endpoint triggers an agent run with the **full permissions of the current DSH account**, unattended, any webpage open in the same browser could forge a cross-site request — including the classic `Content-Type: text/plain` form trick that bypasses the browser's CORS preflight — to silently add or immediately run a task, effectively achieving local code execution.
+
+Fix (`src/http.ts`):
+- **Strictly require `Content-Type: application/json`** (case-insensitive, ignoring parameters like `charset`), rejecting `text/plain` / `application/x-www-form-urlencoded` encodings that skip the browser's preflight check.
+- **Validate that `Origin` matches `Host`**: reject (403) any request that carries an `Origin` header not matching `Host` (which a genuine cross-site request always will); requests without an `Origin` header (e.g. local scripts/CLI tools) are still treated as trusted, so local automation keeps working.
+- Confirmed DSH's `host/webserver` framework itself performs no Origin/CORS validation, so this defense had to live in the plugin's own route handler.
+- Added `src/http.spec.ts` covering the edge cases of both checks.
+
+No other functionality or implementation was changed — all credit for those goes to the original author.
+
 ## Security notes
 
 - **Scheduled tasks run unattended with the current DSH account's permissions** (file read/write, command execution) — only add content you trust
 - `/dsh-schedule/*` endpoints are loopback-only (DSH binds to 127.0.0.1 by default); do not expose the DSH port to the public internet
+- `POST /dsh-schedule/tasks` additionally validates `Content-Type` and that `Origin` matches `Host`, to prevent browser-based cross-site request forgery (see "Changes in this fork" above)
 
 ## License
 

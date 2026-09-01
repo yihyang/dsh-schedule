@@ -5,6 +5,16 @@
  *   GET  /dsh-schedule/tasks   任务列表
  *   POST /dsh-schedule/tasks   {action: add|remove|pause|resume|run, ...}
  *   GET  /dsh-schedule/status  状态快照
+ *
+ * CSRF 防护（POST /dsh-schedule/tasks）：
+ *   仅本机回环绑定不足以防御跨站请求伪造 —— 用户浏览器打开的任意网页仍可向
+ *   127.0.0.1 发起请求。这里做两层防御：
+ *   1. 严格校验 Content-Type 为 application/json，拒绝 text/plain 等
+ *      "simple request" 编码（阻断经典的 JSON-CSRF 表单绕过，因为它们不会
+ *      触发浏览器的跨源预检）。
+ *   2. 若请求带 Origin 头，必须与 Host 头同源，否则拒绝（跨站请求会带
+ *      攻击者自己的 Origin，无法伪造）；缺失 Origin（如本机脚本/curl 调用）
+ *      不视为跨站，予以放行。
  */
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { Context } from '@deepseek-ai/cordis'
@@ -15,6 +25,34 @@ import { type StatusCollector } from './status'
 import { type TaskRunner } from './run'
 
 const MAX_BODY_BYTES = 64 * 1024
+
+/** 供校验用的最小请求头形状（便于单测构造，无需真实 IncomingMessage）。 */
+export interface RequestHeadersLike {
+  headers: Pick<IncomingMessage['headers'], 'origin' | 'host' | 'content-type'>
+}
+
+/** Content-Type 必须精确为 application/json（忽略 charset 等参数、大小写）。 */
+export function hasJsonContentType(req: RequestHeadersLike): boolean {
+  const raw = req.headers['content-type']
+  if (typeof raw !== 'string') return false
+  return raw.split(';')[0]!.trim().toLowerCase() === 'application/json'
+}
+
+/**
+ * Origin 校验：无 Origin 头（本机脚本/非浏览器调用）视为可信；带 Origin 头
+ * 则必须与 Host 同源，否则判定为跨站请求。
+ */
+export function isTrustedOrigin(req: RequestHeadersLike): boolean {
+  const origin = req.headers.origin
+  if (typeof origin !== 'string' || origin === '') return true
+  const host = req.headers.host
+  if (typeof host !== 'string' || host === '') return false
+  try {
+    return new URL(origin).host === host
+  } catch {
+    return false
+  }
+}
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
@@ -99,6 +137,14 @@ export function registerHttpRoutes(ctx: Context, options: HttpRoutesOptions): ()
     }
     if (method !== 'POST') {
       respond(res, 405, { ok: false, message: `不支持的请求方式（${method}）` })
+      return
+    }
+    if (!isTrustedOrigin(req)) {
+      respond(res, 403, { ok: false, message: '跨站请求被拒绝（Origin 与 Host 不匹配）' })
+      return
+    }
+    if (!hasJsonContentType(req)) {
+      respond(res, 415, { ok: false, message: '仅支持 Content-Type: application/json' })
       return
     }
     let body: Record<string, unknown>

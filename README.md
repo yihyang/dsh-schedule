@@ -2,6 +2,8 @@
 
 [![CI](https://github.com/csiroqa/dsh-schedule/actions/workflows/ci.yml/badge.svg)](https://github.com/csiroqa/dsh-schedule/actions/workflows/ci.yml)
 
+> 本仓库 fork 自 [csiroqa/dsh-schedule](https://github.com/csiroqa/dsh-schedule)。全部原始功能、设计与实现均归功于原作者 **csiroqa**；本 fork 仅在其基础上修复了下文列出的安全问题。原始项目与许可见上游仓库。
+
 DeepSeek Harness（DSH）的**定时任务 + 状态监控**插件：按 cron 时间表自动触发 Agent 执行任务（每日摘要、定时巡检、自动报告），并通过 `/status` 命令与设置页仪表盘查看系统与 harness 综合状态。
 
 English: [README.en.md](README.en.md)
@@ -63,10 +65,23 @@ dsh plugin --profile web add link:E:\path\to\dsh-schedule   # Windows
 - 客户端仅依赖平台模块表（react 等），不随 DSH SDK 版本漂移
 - 构建产物：`tsdown`（host 半区 `lib/index.js` + browser 半区 `lib/client.js`，标准 `window.__ModuleLoader__.load` 闭包工厂格式）
 
+## 本 Fork 的改动（相对上游 csiroqa/dsh-schedule）
+
+安全扫描发现 `POST /dsh-schedule/tasks`（设置页新增/删除/暂停/恢复/立即运行任务的接口）仅做了"回环绑定"这一层防护，未校验请求来源。由于该接口触发的任务以 **DSH 当前账号的完整权限**无人值守执行 agent，浏览器里任意打开的网页都可能通过跨站请求伪造（CSRF）——包括绕过预检的经典 `Content-Type: text/plain` 表单技巧——静默地新增或立即运行一个任务，等同于本机任意代码执行。
+
+修复（`src/http.ts`）：
+- **严格校验 `Content-Type` 必须为 `application/json`**（忽略大小写与 `charset` 等参数），拒绝 `text/plain`/`application/x-www-form-urlencoded` 等会绕过浏览器跨源预检的编码方式。
+- **校验 `Origin` 与 `Host` 同源**：带 `Origin` 头且与 `Host` 不一致（跨站请求必然如此）时拒绝（403）；本机脚本等不带 `Origin` 头的调用仍视为可信，不受影响。
+- 已确认 DSH 的 `host/webserver` 框架本身不做任何 Origin/CORS 校验，因此该防护必须在插件路由层实现。
+- 新增 `src/http.spec.ts` 覆盖上述两项校验的边界情况。
+
+其余功能与实现均未改动，全部归功于原作者。
+
 ## 安全说明
 
 - **定时任务会在设定时间无人值守自动执行**（使用 DSH 当前账号权限，可读写你的文件、执行命令），请只添加你信任的任务内容
 - `/dsh-schedule/*` 接口仅监听本机（DSH 默认回环绑定），请勿把 DSH 端口暴露到公网
+- `POST /dsh-schedule/tasks` 额外校验 `Content-Type` 与 `Origin`/`Host` 同源，防止浏览器跨站请求伪造（见上方"本 Fork 的改动"）
 
 ## 许可与使用声明
 
