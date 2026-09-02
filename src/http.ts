@@ -8,13 +8,20 @@
  *
  * CSRF 防护（POST /dsh-schedule/tasks）：
  *   仅本机回环绑定不足以防御跨站请求伪造 —— 用户浏览器打开的任意网页仍可向
- *   127.0.0.1 发起请求。这里做两层防御：
- *   1. 严格校验 Content-Type 为 application/json，拒绝 text/plain 等
+ *   127.0.0.1 发起请求。这里做三层防御：
+ *   1. Host 头白名单（回环绑定时生效）：Host 必须是 127.0.0.1/localhost/[::1]
+ *      加实际监听端口之一。这一层专门防 DNS rebinding —— 攻击域名的 DNS
+ *      记录可被重新解析指向 127.0.0.1，但浏览器发出请求时 Host 头仍是原始
+ *      域名（取自 URL，不随解析结果变化），因此会被这条规则拦下，即便此时
+ *      Origin 与 Host 彼此一致（这是 rebinding 能绕过下面第 2 层校验的原因）。
+ *      绑定 0.0.0.0（管理员已主动放宽到非回环）时无法枚举合法 Host，跳过本层。
+ *   2. 若请求带 Origin 头，必须与 Host 头同源，否则拒绝（普通跨站请求会带
+ *      攻击者自己的 Origin，无法伪造）；缺失 Origin（如本机脚本/curl 调用）
+ *      不视为跨站，予以放行；Origin 存在但为空字符串/非法值时按拒绝处理
+ *      （异常值不应被当作"可信"的默认项）。
+ *   3. 严格校验 Content-Type 为 application/json，拒绝 text/plain 等
  *      "simple request" 编码（阻断经典的 JSON-CSRF 表单绕过，因为它们不会
  *      触发浏览器的跨源预检）。
- *   2. 若请求带 Origin 头，必须与 Host 头同源，否则拒绝（跨站请求会带
- *      攻击者自己的 Origin，无法伪造）；缺失 Origin（如本机脚本/curl 调用）
- *      不视为跨站，予以放行。
  */
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { Context } from '@deepseek-ai/cordis'
@@ -39,12 +46,14 @@ export function hasJsonContentType(req: RequestHeadersLike): boolean {
 }
 
 /**
- * Origin 校验：无 Origin 头（本机脚本/非浏览器调用）视为可信；带 Origin 头
- * 则必须与 Host 同源，否则判定为跨站请求。
+ * Origin 校验：缺失 Origin 头（本机脚本/非浏览器调用）视为可信；带 Origin 头
+ * 则必须与 Host 同源，否则判定为跨站请求。空字符串/非法值等异常情形一律
+ * 按"不可信"处理（安全校验失败应默认拒绝，而非默认放行）。
  */
 export function isTrustedOrigin(req: RequestHeadersLike): boolean {
   const origin = req.headers.origin
-  if (typeof origin !== 'string' || origin === '') return true
+  if (origin === undefined) return true
+  if (typeof origin !== 'string' || origin === '') return false
   const host = req.headers.host
   if (typeof host !== 'string' || host === '') return false
   try {
@@ -52,6 +61,25 @@ export function isTrustedOrigin(req: RequestHeadersLike): boolean {
   } catch {
     return false
   }
+}
+
+/** ctx.webServer 的最小形状（便于单测构造）。 */
+export interface WebServerBinding {
+  readonly host: '127.0.0.1' | '0.0.0.0'
+  readonly port: number
+}
+
+/**
+ * Host 白名单校验（防 DNS rebinding）：仅在回环绑定时生效 —— Host 必须精确
+ * 匹配 127.0.0.1/localhost/[::1] 三者之一加实际监听端口。绑定 0.0.0.0
+ * （管理员已主动放宽到非回环）时无法预先枚举合法 Host，一律放行，交由
+ * isTrustedOrigin 兜底。
+ */
+export function isTrustedHost(host: string | undefined, binding: WebServerBinding): boolean {
+  if (binding.host === '0.0.0.0') return true
+  if (typeof host !== 'string' || host === '') return false
+  const allowed = [`127.0.0.1:${binding.port}`, `localhost:${binding.port}`, `[::1]:${binding.port}`]
+  return allowed.includes(host.toLowerCase())
 }
 
 function errorMessage(error: unknown): string {
@@ -137,6 +165,10 @@ export function registerHttpRoutes(ctx: Context, options: HttpRoutesOptions): ()
     }
     if (method !== 'POST') {
       respond(res, 405, { ok: false, message: `不支持的请求方式（${method}）` })
+      return
+    }
+    if (!isTrustedHost(req.headers.host, { host: ctx.webServer.host, port: ctx.webServer.port })) {
+      respond(res, 403, { ok: false, message: '跨站请求被拒绝（Host 不在允许的本机地址列表）' })
       return
     }
     if (!isTrustedOrigin(req)) {

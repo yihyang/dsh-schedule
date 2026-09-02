@@ -69,11 +69,12 @@ dsh plugin --profile web add link:E:\path\to\dsh-schedule   # Windows
 
 安全扫描发现 `POST /dsh-schedule/tasks`（设置页新增/删除/暂停/恢复/立即运行任务的接口）仅做了"回环绑定"这一层防护，未校验请求来源。由于该接口触发的任务以 **DSH 当前账号的完整权限**无人值守执行 agent，浏览器里任意打开的网页都可能通过跨站请求伪造（CSRF）——包括绕过预检的经典 `Content-Type: text/plain` 表单技巧——静默地新增或立即运行一个任务，等同于本机任意代码执行。
 
-修复（`src/http.ts`）：
-- **严格校验 `Content-Type` 必须为 `application/json`**（忽略大小写与 `charset` 等参数），拒绝 `text/plain`/`application/x-www-form-urlencoded` 等会绕过浏览器跨源预检的编码方式。
-- **校验 `Origin` 与 `Host` 同源**：带 `Origin` 头且与 `Host` 不一致（跨站请求必然如此）时拒绝（403）；本机脚本等不带 `Origin` 头的调用仍视为可信，不受影响。
-- 已确认 DSH 的 `host/webserver` 框架本身不做任何 Origin/CORS 校验，因此该防护必须在插件路由层实现。
-- 新增 `src/http.spec.ts` 覆盖上述两项校验的边界情况。
+修复（`src/http.ts`），三层防御：
+- **Host 白名单**（回环绑定时生效）：Host 头必须精确匹配 `127.0.0.1`/`localhost`/`[::1]` 三者之一加实际监听端口。这一层专门防 **DNS rebinding**——攻击域名的 DNS 记录可被重新解析指向 `127.0.0.1`，但浏览器发出请求时 Host 头仍是原始域名（取自 URL，不随解析结果变化），因此会被拦下，即便此时 Origin 与 Host 彼此一致（这正是 rebinding 能绕过单纯 Origin/Host 同源校验的原因）。绑定 `0.0.0.0`（管理员已主动放宽到非回环）时无法枚举合法 Host，跳过本层，交由 Origin 校验兜底。
+- **校验 `Origin` 与 `Host` 同源**：带 `Origin` 头且与 `Host` 不一致（普通跨站请求必然如此）时拒绝（403）；本机脚本等不带 `Origin` 头的调用仍视为可信，不受影响；`Origin` 存在但为空字符串/非法值等异常情形一律按"不可信"处理（安全校验失败应默认拒绝，而非默认放行）。
+- **严格校验 `Content-Type` 必须为 `application/json`**（忽略大小写与 `charset` 等参数），拒绝 `text/plain`/`application/x-www-form-urlencoded`/`multipart/form-data` 等 HTML 表单可达、且会绕过浏览器跨源预检的编码方式。
+- 已确认 DSH 的 `host/webserver` 框架本身不做任何 Origin/CORS/Host 校验，因此该防护必须在插件路由层实现。
+- 新增 `src/http.spec.ts` 覆盖上述三项校验的边界情况（含 DNS rebinding、IPv6 回环地址、不透明 Origin 等）。
 
 其余功能与实现均未改动，全部归功于原作者。
 
@@ -81,7 +82,7 @@ dsh plugin --profile web add link:E:\path\to\dsh-schedule   # Windows
 
 - **定时任务会在设定时间无人值守自动执行**（使用 DSH 当前账号权限，可读写你的文件、执行命令），请只添加你信任的任务内容
 - `/dsh-schedule/*` 接口仅监听本机（DSH 默认回环绑定），请勿把 DSH 端口暴露到公网
-- `POST /dsh-schedule/tasks` 额外校验 `Content-Type` 与 `Origin`/`Host` 同源，防止浏览器跨站请求伪造（见上方"本 Fork 的改动"）
+- `POST /dsh-schedule/tasks` 额外校验 Host 白名单、`Origin`/`Host` 同源与 `Content-Type`，防止浏览器跨站请求伪造与 DNS rebinding（见上方"本 Fork 的改动"）
 
 ## 许可与使用声明
 
